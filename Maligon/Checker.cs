@@ -7,7 +7,7 @@ namespace Maligon
     public class Checker
     {
         //FBX, Collada, GLTF, OBJ, 3DS, DXF
-        private List<string> Formats = new List<string>() {"obj", "gltf", "FBX" };
+        private List<string> Formats = new List<string>() {"obj", "gltf", "FBX", "fbx" };
 
         public (bool, string) CheckFormat(string[] Texts)
         {

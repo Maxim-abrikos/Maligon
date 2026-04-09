@@ -95,7 +95,8 @@ namespace Maligon
             var builder = new LineBuilder(mesh, occupancy);
             var collapser = new LineCollapser(mesh);
 
-            float threshold = 1000000000f; // пока фиксированное значение
+            //float threshold = 0.03f; // пока фиксированное значение
+            
 
             // 2. Выбор стартового полигона
             var start = mesh.Faces
@@ -139,13 +140,50 @@ namespace Maligon
                 }
 
                 // 🔥 Основное условие остановки
-                if (line.TotalError > threshold)
-                    break;
+                
             }
 
             // 4. Проверка длины
-            builder.EnsureEvenLength(line);
+            //builder.EnsureEvenLength(line);
 
+            if (line.Faces.Count % 2 != 0)
+            {
+                // удаляем последний полигон (Tail)
+                var last = line.Tail;
+
+                if (last != null)
+                {
+                    line.Faces.RemoveLast();
+                    line.FaceSet.Remove(last);
+
+                    // если у Face есть Id — лучше использовать его
+                    // иначе оставь как есть (FaceSet уже очищен)
+                    // line.VertexSet — НЕ трогаем (важно!)
+
+                    line.TotalError -= last.Error;
+                }
+            }
+
+            // 4. Приведение длины к чётной
+            if (line.Faces.Count % 2 != 0)
+            {
+                if (line.Head != null && line.Tail != null)
+                {
+                    bool removeHead = line.Head.Error > line.Tail.Error;
+
+                    var toRemove = removeHead ? line.Head : line.Tail;
+
+                    if (removeHead)
+                        line.Faces.RemoveFirst();
+                    else
+                        line.Faces.RemoveLast();
+
+                    line.FaceSet.Remove(toRemove);
+                    line.TotalError -= toRemove.Error;
+                }
+            }
+
+            // Проверка минимальной длины
             if (line.Faces.Count < 2)
             {
                 MessageBox.Show("Линия слишком короткая");
