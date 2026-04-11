@@ -25,75 +25,218 @@ namespace Maligon.WorkClasses
             _occupancy = occupancy;
         }
 
+
+
+        public OptimizationLine BuildLine(int maxIterations = 200)
+        {
+            ComputeAreaSimilarity();
+
+            // 1. старт
+            var start = _mesh.Faces
+                .Where(f => !f.IsUsed)
+                .OrderBy(f => f.AreaSimilarity)
+                .FirstOrDefault();
+
+            if (start == null)
+                return null;
+
+            var line = new OptimizationLine();
+
+            AddFace(line, start, true);
+
+            // 2. выбрать второго
+            var firstNeighborId = start.Neighbors.FirstOrDefault(n => n >= 0);
+
+            if (firstNeighborId < 0)
+                return line;
+
+            var second = _mesh.Faces[firstNeighborId];
+
+            AddFace(line, second, false);
+
+            // направление
+            line.LastDirection = GetDirection(start, second);
+
+            line.RecalculateAreaMean();
+
+            int iterations = 0;
+
+            // 3. рост
+            while (iterations++ < maxIterations)
+            {
+                var next = SelectBestCandidate(line);
+
+                if (next == null)
+                    break;
+
+                AddFace(line, next.Value.face, next.Value.toHead);
+
+                UpdateLineState(line, next.Value.face);
+            }
+
+            return line;
+        }
+
+
+        private void UpdateLineState(OptimizationLine line, Face newFace)
+        {
+            if (line.Faces.Count < 2)
+                return;
+
+            var last = line.Faces.Last.Value;
+            var prev = line.Faces.Last.Previous?.Value;
+
+            if (prev == null) return;
+
+            var newDir = GetDirection(prev, last);
+
+            if (line.Faces.Count >= 4)
+            {
+                float k = SignedCurvature(line.LastDirection, newDir, prev.Normal);
+
+                line.RecentCurvatures.Enqueue(k);
+
+                if (line.RecentCurvatures.Count > 5)
+                    line.RecentCurvatures.Dequeue();
+            }
+
+            line.LastDirection = newDir;
+
+            line.RecalculateAreaMean();
+        }
+
+
+
+        private Vector3 GetDirection(Face a, Face b)
+        {
+            var ca = GetFaceCenter(a);
+            var cb = GetFaceCenter(b);
+
+            var dir = cb - ca;
+            return Vector3.Normalize(dir);
+        }
+
+
+
+        private float SignedCurvature(Vector3 prevDir, Vector3 newDir, Vector3 normal)
+        {
+            var cross = Vector3.Cross(prevDir, newDir);
+            float sign = Math.Sign(Vector3.Dot(cross, normal));
+
+            float angle = AngleBetween(prevDir, newDir);
+
+            return angle * sign;
+        }
+
+
+
         public (Face face, bool toHead)? SelectBestCandidate(OptimizationLine line)
         {
             if (line.Head == null || line.Tail == null)
                 return null;
 
+            float tauArea = 0.2f;
+            float tauDir = 0.0f;
+            float tauCurv = 0.3f;
+            //float tauArea = 1.0f;     // было 0.2
+            //float tauDir = -0.5f;     // было 0.0
+            //float tauCurv = 1.0f;     // было 0.3
+
             var headCandidates = MeshUtils.GetNeighbors(line.Head, _mesh)
-                .Where(f => !line.FaceSet.Contains(f) && !IsBacktracking(f, line))
+                .Where(f => !line.FaceSet.Contains(f) /*&& !IsBacktracking(f, line)*/)
                 .ToList();
 
             var tailCandidates = MeshUtils.GetNeighbors(line.Tail, _mesh)
-                .Where(f => !line.FaceSet.Contains(f) && !IsBacktracking(f, line))
+                .Where(f => !line.FaceSet.Contains(f) /*&& !IsBacktracking(f, line)*/)
                 .ToList();
+
+            var allCandidates = new List<(Face face, bool toHead)>();
+            allCandidates.AddRange(headCandidates.Select(f => (f, true)));
+            allCandidates.AddRange(tailCandidates.Select(f => (f, false)));
+
+            List<(Face face, bool toHead)> valid = new();
+
+            foreach (var c in allCandidates)
+            {
+                var f = c.face;
+
+                if (f.IsUsed)
+                    continue;
+
+                // площадь
+                float areaDiff = Math.Abs(f.Area - line.AreaMean) / (line.AreaMean + 1e-6f);
+                if (areaDiff > tauArea)
+                    continue;
+
+                // направление
+                var current = c.toHead ? line.Head : line.Tail;
+                var newDir = GetDirection(current, f);
+
+                float dot = Vector3.Dot(line.LastDirection, newDir);
+                if (dot < tauDir)
+                    continue;
+
+                //curvature
+                if (line.Faces.Count >= 4)
+                {
+                    float kNew = SignedCurvature(line.LastDirection, newDir, current.Normal);
+                    float kExpected = line.GetExpectedCurvature();
+
+                    float curvError = Math.Abs(kNew - kExpected);
+
+                    if (curvError > tauCurv)
+                        continue;
+                }
+
+                valid.Add(c);
+            }
+
+            // fallback
+            if (valid.Count == 0)
+            {
+                foreach (var c in allCandidates)
+                {
+                    if (!c.face.IsUsed)
+                        valid.Add(c);
+                }
+
+                if (valid.Count == 0)
+                    return null;
+            }
+
+            // выбор
             (Face face, bool toHead)? best = null;
-            float bestScore = float.MaxValue;
 
-            // кандидаты с головы
-            foreach (var f in headCandidates)
+            float bestCurv = float.MaxValue;
+            float bestDot = -1f;
+
+            foreach (var c in valid)
             {
-                float score = EvaluateCandidate(f, line, true);
-                if (score > MAX_STEP_ERROR)
-                    continue;
-                if (score < bestScore)
+                var current = c.toHead ? line.Head : line.Tail;
+                var newDir = GetDirection(current, c.face);
+
+                float dot = Vector3.Dot(line.LastDirection, newDir);
+
+                float curvError = 0f;
+
+                if (line.Faces.Count >= 4)
                 {
-                    bestScore = score;
-                    best = (f, true);
-                }
-            }
+                    float kNew = SignedCurvature(line.LastDirection, newDir, current.Normal);
+                    float kExpected = line.GetExpectedCurvature();
 
-            // кандидаты с хвоста
-            foreach (var f in tailCandidates)
-            {
-                float score = EvaluateCandidate(f, line, false);
-                if (score > MAX_STEP_ERROR)
-                    continue;
-                if (score < bestScore)
+                    curvError = Math.Abs(kNew - kExpected);
+                }
+
+                if (curvError < bestCurv ||
+                   (Math.Abs(curvError - bestCurv) < 1e-5f && dot > bestDot))
                 {
-                    bestScore = score;
-                    best = (f, false);
+                    bestCurv = curvError;
+                    bestDot = dot;
+                    best = c;
                 }
-            }
-
-            // если после фильтров ничего не осталось — ослабляем условия
-            if (!headCandidates.Any() && !tailCandidates.Any())
-            {
-                headCandidates = MeshUtils.GetNeighbors(line.Head, _mesh)
-                    .Where(f => !line.FaceSet.Contains(f))
-                    .ToList();
-
-                tailCandidates = MeshUtils.GetNeighbors(line.Tail, _mesh)
-                    .Where(f => !line.FaceSet.Contains(f))
-                    .ToList();
             }
 
             return best;
-            //var bestHead = headCandidates.OrderBy(f => f.Error).FirstOrDefault();
-            //var bestTail = tailCandidates.OrderBy(f => f.Error).FirstOrDefault();
-
-            //if (bestHead == null && bestTail == null)
-            //    return null;
-
-            //if (bestHead == null)
-            //    return (bestTail, false);
-
-            //if (bestTail == null)
-            //    return (bestHead, true);
-
-            //return bestHead.Error < bestTail.Error
-            //    ? (bestHead, true)
-            //    : (bestTail, false);
         }
 
         //public (Face face, bool toHead)? SelectBestCandidate(OptimizationLine line)
@@ -102,55 +245,55 @@ namespace Maligon.WorkClasses
         //        return null;
 
         //    var headCandidates = MeshUtils.GetNeighbors(line.Head, _mesh)
-        //        .Where(f => _occupancy.IsFree(f) && !line.FaceSet.Contains(f))
+        //        .Where(f => !line.FaceSet.Contains(f) && !IsBacktracking(f, line))
         //        .ToList();
 
         //    var tailCandidates = MeshUtils.GetNeighbors(line.Tail, _mesh)
-        //        .Where(f => _occupancy.IsFree(f) && !line.FaceSet.Contains(f))
+        //        .Where(f => !line.FaceSet.Contains(f) && !IsBacktracking(f, line))
         //        .ToList();
+        //    (Face face, bool toHead)? best = null;
+        //    float bestScore = float.MaxValue;
 
-        //    var bestHead = headCandidates.OrderBy(f => f.Error).FirstOrDefault();
-        //    var bestTail = tailCandidates.OrderBy(f => f.Error).FirstOrDefault();
+        //    // кандидаты с головы
+        //    foreach (var f in headCandidates)
+        //    {
+        //        float score = EvaluateCandidate(f, line, true);
+        //        if (score > MAX_STEP_ERROR)
+        //            continue;
+        //        if (score < bestScore)
+        //        {
+        //            bestScore = score;
+        //            best = (f, true);
+        //        }
+        //    }
 
-        //    if (bestHead == null && bestTail == null)
-        //        return null;
+        //    // кандидаты с хвоста
+        //    foreach (var f in tailCandidates)
+        //    {
+        //        float score = EvaluateCandidate(f, line, false);
+        //        if (score > MAX_STEP_ERROR)
+        //            continue;
+        //        if (score < bestScore)
+        //        {
+        //            bestScore = score;
+        //            best = (f, false);
+        //        }
+        //    }
 
-        //    if (bestHead == null)
-        //        return (bestTail, false);
+        //    // если после фильтров ничего не осталось — ослабляем условия
+        //    if (!headCandidates.Any() && !tailCandidates.Any())
+        //    {
+        //        headCandidates = MeshUtils.GetNeighbors(line.Head, _mesh)
+        //            .Where(f => !line.FaceSet.Contains(f))
+        //            .ToList();
 
-        //    if (bestTail == null)
-        //        return (bestHead, true);
+        //        tailCandidates = MeshUtils.GetNeighbors(line.Tail, _mesh)
+        //            .Where(f => !line.FaceSet.Contains(f))
+        //            .ToList();
+        //    }
 
-        //    return bestHead.Error < bestTail.Error
-        //        ? (bestHead, true)
-        //        : (bestTail, false);
+        //    return best;
         //}
-
-        //public Face SelectBestCandidate(OptimizationLine line)
-        //{
-        //    if (line.Head == null || line.Tail == null)
-        //        return null;
-        //    var candidates = new List<Face>();
-
-        //    candidates.AddRange(
-        //        MeshUtils.GetNeighbors(line.Head, _mesh)
-        //            .Where(f => _occupancy.IsFree(f) && !line.FaceSet.Contains(f))
-        //    );
-
-        //    candidates.AddRange(
-        //        MeshUtils.GetNeighbors(line.Tail, _mesh)
-        //            .Where(f => _occupancy.IsFree(f) && !line.FaceSet.Contains(f))
-        //    );
-
-        //    Debug.WriteLine($"Head neighbors: {MeshUtils.GetNeighbors(line.Head, _mesh).Count}");
-        //    Debug.WriteLine($"Tail neighbors: {MeshUtils.GetNeighbors(line.Tail, _mesh).Count}");
-        //    Debug.WriteLine($"Line length: {line.Faces.Count}");
-
-        //    return candidates
-        //        .OrderBy(f => f.Error)
-        //        .FirstOrDefault();
-        //}
-
 
         private float EvaluateCandidate(Face candidate, OptimizationLine line, bool toHead)
         {
@@ -228,6 +371,28 @@ namespace Maligon.WorkClasses
             return sum;
         }
 
+        public void ComputeAreaSimilarity()
+        {
+            foreach (var f in _mesh.Faces)
+            {
+                float sum = 0f;
+                int count = 0;
+
+                for (int i = 0; i < 3; i++)
+                {
+                    int nId = f.Neighbors[i];
+                    if (nId < 0) continue;
+
+                    var n = _mesh.Faces[nId];
+
+                    float diff = Math.Abs(f.Area - n.Area) / (f.Area + 1e-6f);
+                    sum += diff;
+                    count++;
+                }
+
+                f.AreaSimilarity = count > 0 ? sum / count : float.MaxValue;
+            }
+        }
         private float AngleBetween(Vector3 a, Vector3 b)
         {
             a = Vector3.Normalize(a);
@@ -261,24 +426,6 @@ namespace Maligon.WorkClasses
 
             return candidate == secondFromHead || candidate == secondFromTail;
         }
-
-        //private bool IsBacktracking(Face candidate, OptimizationLine line)
-        //{
-        //    if (line.Faces.Count < 2)
-        //        return false;
-
-        //    var second = line.Faces.First.Next?.Value;
-        //    var beforeLast = line.Faces.Last.Previous?.Value;
-
-        //    // если кандидат ведёт "назад" — запрещаем
-        //    if (second != null && MeshUtils.IsNeighbor(candidate, second))
-        //        return true;
-
-        //    if (beforeLast != null && MeshUtils.IsNeighbor(candidate, beforeLast))
-        //        return true;
-
-        //    return false;
-        //}
         public void AddFace(OptimizationLine line, Face f, bool toHead)
         {
             if (line.Faces.Count == 0)

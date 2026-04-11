@@ -20,5 +20,7 @@ namespace Maligon.SubClasses
         public float Error;
 
         public bool IsUsed; // занят линией
+
+        public float AreaSimilarity;
     }
 }

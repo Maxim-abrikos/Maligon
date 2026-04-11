@@ -1,10 +1,12 @@
 ﻿using Assimp;
-using Microsoft.Win32;
-using System;
-using System.Collections.Generic;
-using System.Numerics;
-using System.Text;
+using SharpGLTF;
+using SharpGLTF.Geometry;
+using SharpGLTF.Geometry.VertexTypes;
+using SharpGLTF.Materials;
+using SharpGLTF.Scenes;
 using System.IO;
+using System.Numerics;
+using SharpGLTF.Transforms;
 
 namespace Maligon
 {
@@ -21,9 +23,9 @@ namespace Maligon
                 scene = _context.ImportFile(
                     sourcePath,
                     PostProcessSteps.Triangulate |
-                    PostProcessSteps.JoinIdenticalVertices |
-                    PostProcessSteps.GenerateNormals |
-                    PostProcessSteps.ImproveCacheLocality |
+                    PostProcessSteps.GenerateSmoothNormals |
+                    PostProcessSteps.FixInFacingNormals |
+                    PostProcessSteps.CalculateTangentSpace |
                     PostProcessSteps.SortByPrimitiveType
                 );
             }
@@ -40,7 +42,6 @@ namespace Maligon
                     "Файл загружен, но меши отсутствуют");
 
             string gltfPath = EnsureGltf(scene, sourcePath);
-            //MeshData mesh = ConvertSceneToMeshData(scene);
             var lodModel = ConvertSceneToLodModel(scene);
             return new ModelImportResult
             {
@@ -91,6 +92,7 @@ namespace Maligon
                 File.Copy(sourceBin, targetBin, true);
         }
 
+
         private string EnsureGltf(Scene scene, string sourcePath)
         {
             string workingDir = CreateWorkingDirectory();
@@ -106,23 +108,17 @@ namespace Maligon
             {
                 File.Copy(sourcePath, targetGltfPath, true);
                 CopyAssociatedBin(sourcePath, workingDir);
-
                 return targetGltfPath;
             }
 
-            if (ext == ".glb")
-            {
-                _context.ExportFile(scene, targetGltfPath, "gltf2");
-                FixGltfBufferUri(targetGltfPath);
-
-                return targetGltfPath;
-            }
-
+            // 🔥 ВАЖНО: всегда экспортируем заново
             _context.ExportFile(scene, targetGltfPath, "gltf2");
+
             FixGltfBufferUri(targetGltfPath);
 
             return targetGltfPath;
         }
+        
 
         private static void RenameMeshesAsLods(Scene scene)
         {
@@ -147,67 +143,6 @@ namespace Maligon
             {
                 meshes[i].Mesh.Name = $"LOD{i}";
             }
-        }
-
-        private MeshData ConvertSceneToMeshData(Scene scene)
-        {
-            var vertices = new List<Vector3>();
-            var normals = new List<Vector3>();
-            var uvs = new List<Vector2>();
-            var indices = new List<int>();
-
-            int vertexOffset = 0;
-
-            foreach (var mesh in scene.Meshes)
-            {
-                // Вершины
-                foreach (var v in mesh.Vertices)
-                    vertices.Add(new Vector3(v.X, v.Y, v.Z));
-
-                // Нормали
-                if (mesh.HasNormals)
-                {
-                    foreach (var n in mesh.Normals)
-                        normals.Add(new Vector3(n.X, n.Y, n.Z));
-                }
-                else
-                {
-                    normals.AddRange(
-                        Enumerable.Repeat(Vector3.UnitY, mesh.VertexCount));
-                }
-
-                // UV (канал 0)
-                if (mesh.HasTextureCoords(0))
-                {
-                    foreach (var uv in mesh.TextureCoordinateChannels[0])
-                        uvs.Add(new Vector2(uv.X, uv.Y));
-                }
-                else
-                {
-                    uvs.AddRange(
-                        Enumerable.Repeat(Vector2.Zero, mesh.VertexCount));
-                }
-
-                foreach (var face in mesh.Faces)
-                {
-                    if (face.IndexCount != 3)
-                        continue;
-
-                    indices.Add(vertexOffset + face.Indices[0]);
-                    indices.Add(vertexOffset + face.Indices[1]);
-                    indices.Add(vertexOffset + face.Indices[2]);
-                }
-
-                vertexOffset += mesh.VertexCount;
-            }
-
-            return new MeshData
-            {
-                Vertices = vertices.ToArray(),
-                Normals = normals.ToArray(),
-                UVs = uvs.ToArray(),
-                Indices = indices.ToArray()
-            };
         }
 
         public void Dispose()
@@ -243,22 +178,141 @@ namespace Maligon
 
 
 
+        //public void Export(ModelImportResult model, string targetDirectory)
+        //{
+        //    Directory.CreateDirectory(targetDirectory);
+
+        //    foreach (var file in Directory.GetFiles(model.WorkingDirectory))
+        //    {
+        //        string dest = Path.Combine(
+        //            targetDirectory,
+        //            Path.GetFileName(file)
+        //        );
+
+        //        File.Copy(file, dest, true);
+        //    }
+        //}
+
         public void Export(ModelImportResult model, string targetDirectory)
         {
             Directory.CreateDirectory(targetDirectory);
 
-            foreach (var file in Directory.GetFiles(model.WorkingDirectory))
-            {
-                string dest = Path.Combine(
-                    targetDirectory,
-                    Path.GetFileName(file)
-                );
+            var scene = new SceneBuilder();
 
-                File.Copy(file, dest, true);
+            var root = new NodeBuilder("Root");
+
+            int lodIndex = 0;
+
+            foreach (var lod in model.LodModel.Lods)
+            {
+                var mesh = BuildMesh(lod.Mesh, $"LOD{lodIndex}");
+
+                var node = new NodeBuilder($"LOD{lodIndex}");
+
+                scene.AddRigidMesh(mesh, node);
+
+                root.AddNode(node); // 🔥 ВАЖНО
+
+                lodIndex++;
             }
+
+            scene.AddNode(root); // 🔥 ВАЖНО
+
+            var sourceName = Path.GetFileNameWithoutExtension(model.GltfPath);
+            string path = Path.Combine(targetDirectory, sourceName + ".gltf");
+
+            scene.ToGltf2().Save(path);
         }
 
 
+        private MeshBuilder<VertexPositionNormal, VertexTexture1, VertexEmpty> BuildMesh(
+    MeshData data,
+    string name)
+        {
+            var mesh = new MeshBuilder<VertexPositionNormal, VertexTexture1, VertexEmpty>(name);
+
+            var material = new MaterialBuilder()
+                .WithDoubleSide(true);
+
+            var prim = mesh.UsePrimitive(material);
+
+            for (int i = 0; i < data.Indices.Length; i += 3)
+            {
+                int i0 = data.Indices[i];
+                int i1 = data.Indices[i + 1];
+                int i2 = data.Indices[i + 2];
+
+                var v0 = CreateVertex(data, i0);
+                var v1 = CreateVertex(data, i1);
+                var v2 = CreateVertex(data, i2);
+
+                prim.AddTriangle(v0, v1, v2);
+            }
+
+            return mesh;
+        }
+
+
+        private (VertexPositionNormal, VertexTexture1, VertexEmpty) CreateVertex(
+    MeshData data,
+    int index)
+        {
+            var pos = data.Vertices[index];
+            var normal = data.Normals[index];
+
+            var uv = (data.UVs != null && data.UVs.Length > index)
+                ? data.UVs[index]
+                : Vector2.Zero;
+
+            var vPosNorm = new VertexPositionNormal(pos, normal);
+            var vTex = new VertexTexture1(uv);
+
+            return (vPosNorm, vTex, new VertexEmpty());
+        }
+
+
+        private Assimp.Mesh ConvertToAssimpMesh(MeshData data)
+        {
+            var mesh = new Assimp.Mesh(PrimitiveType.Triangle);
+
+            // ВЕРШИНЫ
+            foreach (var v in data.Vertices)
+                mesh.Vertices.Add(new Assimp.Vector3D(v.X, v.Y, v.Z));
+
+            // НОРМАЛИ
+            if (data.Normals != null && data.Normals.Length == data.Vertices.Length)
+            {
+                foreach (var n in data.Normals)
+                    mesh.Normals.Add(new Assimp.Vector3D(n.X, n.Y, n.Z));
+            }
+
+            // UV (🔥 ПРАВИЛЬНО)
+            if (data.UVs != null && data.UVs.Length == data.Vertices.Length)
+            {
+                mesh.TextureCoordinateChannels[0] = new List<Assimp.Vector3D>();
+
+                foreach (var uv in data.UVs)
+                {
+                    mesh.TextureCoordinateChannels[0].Add(
+                        new Assimp.Vector3D(uv.X, uv.Y, 0));
+                }
+
+                mesh.UVComponentCount[0] = 2;
+            }
+
+            // ИНДЕКСЫ
+            for (int i = 0; i < data.Indices.Length; i += 3)
+            {
+                var face = new Face();
+                face.Indices.Add(data.Indices[i]);
+                face.Indices.Add(data.Indices[i + 1]);
+                face.Indices.Add(data.Indices[i + 2]);
+
+                mesh.Faces.Add(face);
+            }
+
+            return mesh;
+        }
 
 
         private LodModel ConvertSceneToLodModel(Scene scene)
@@ -277,7 +331,6 @@ namespace Maligon
             return result;
         }
 
-
         private MeshData ConvertSingleMesh(Assimp.Mesh mesh)
         {
             var vertices = new List<Vector3>();
@@ -285,39 +338,72 @@ namespace Maligon
             var uvs = new List<Vector2>();
             var indices = new List<int>();
 
-            foreach (var v in mesh.Vertices)
-                vertices.Add(new Vector3(v.X, v.Y, v.Z));
+            // 🔥 карта "позиция → индекс новой вершины"
+            var vertexMap = new Dictionary<(int, int, int), int>();
 
-            if (mesh.HasNormals)
-            {
-                foreach (var n in mesh.Normals)
-                    normals.Add(new Vector3(n.X, n.Y, n.Z));
-            }
-            else
-            {
-                normals.AddRange(
-                    Enumerable.Repeat(Vector3.UnitY, mesh.VertexCount));
-            }
+            float epsilon = 1e-6f;
 
-            if (mesh.HasTextureCoords(0))
+            (int, int, int) Quantize(Vector3 v)
             {
-                foreach (var uv in mesh.TextureCoordinateChannels[0])
-                    uvs.Add(new Vector2(uv.X, uv.Y));
-            }
-            else
-            {
-                uvs.AddRange(
-                    Enumerable.Repeat(Vector2.Zero, mesh.VertexCount));
+                return (
+                    (int)(v.X / epsilon),
+                    (int)(v.Y / epsilon),
+                    (int)(v.Z / epsilon)
+                );
             }
 
             foreach (var face in mesh.Faces)
             {
                 if (face.IndexCount != 3)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"Non-triangle face detected: {face.IndexCount}"
+                    );
                     continue;
+                }
 
-                indices.Add(face.Indices[0]);
-                indices.Add(face.Indices[1]);
-                indices.Add(face.Indices[2]);
+                for (int i = 0; i < 3; i++)
+                {
+                    int originalIndex = face.Indices[i];
+
+                    var pos = mesh.Vertices[originalIndex];
+                    var vertex = new Vector3(pos.X, pos.Y, pos.Z);
+
+                    var key = Quantize(vertex);
+
+                    if (!vertexMap.TryGetValue(key, out int newIndex))
+                    {
+                        newIndex = vertices.Count;
+
+                        vertices.Add(vertex);
+
+                        // нормаль
+                        if (mesh.HasNormals)
+                        {
+                            var n = mesh.Normals[originalIndex];
+                            normals.Add(new Vector3(n.X, n.Y, n.Z));
+                        }
+                        else
+                        {
+                            normals.Add(Vector3.UnitY);
+                        }
+
+                        // UV
+                        if (mesh.HasTextureCoords(0))
+                        {
+                            var uv = mesh.TextureCoordinateChannels[0][originalIndex];
+                            uvs.Add(new Vector2(uv.X, uv.Y));
+                        }
+                        else
+                        {
+                            uvs.Add(Vector2.Zero);
+                        }
+
+                        vertexMap[key] = newIndex;
+                    }
+
+                    indices.Add(newIndex);
+                }
             }
 
             return new MeshData

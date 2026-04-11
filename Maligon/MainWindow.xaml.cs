@@ -95,100 +95,14 @@ namespace Maligon
             var builder = new LineBuilder(mesh, occupancy);
             var collapser = new LineCollapser(mesh);
 
-            //float threshold = 0.03f; // пока фиксированное значение
-            
+            var line = builder.BuildLine();
 
-            // 2. Выбор стартового полигона
-            var start = mesh.Faces
-                .Where(f => !f.IsUsed)
-                .OrderBy(f => f.Error)
-                .FirstOrDefault();
-
-            if (start == null)
-            {
-                MessageBox.Show("Нет доступных полигонов");
-                return;
-            }
-
-            var line = new OptimizationLine();
-            builder.AddFace(line, start, true);
-
-            // 3. Рост линии
-            int iterations = 0;
-
-            while (true)
-            {
-                // 🔥 Ограничение по числу итераций
-                if (iterations++ > 200)
-                {
-                    Debug.WriteLine("Too many iterations, breaking");
-                    break;
-                }
-
-                var next = builder.SelectBestCandidate(line);
-
-                if (next == null)
-                    break;
-
-                builder.AddFace(line, next.Value.face, next.Value.toHead);
-
-                // 🔥 Ограничение длины линии
-                if (line.Faces.Count > 100)
-                {
-                    Debug.WriteLine("Line too long, breaking");
-                    break;
-                }
-
-                // 🔥 Основное условие остановки
-                
-            }
-
-            // 4. Проверка длины
-            //builder.EnsureEvenLength(line);
-
-            if (line.Faces.Count % 2 != 0)
-            {
-                // удаляем последний полигон (Tail)
-                var last = line.Tail;
-
-                if (last != null)
-                {
-                    line.Faces.RemoveLast();
-                    line.FaceSet.Remove(last);
-
-                    // если у Face есть Id — лучше использовать его
-                    // иначе оставь как есть (FaceSet уже очищен)
-                    // line.VertexSet — НЕ трогаем (важно!)
-
-                    line.TotalError -= last.Error;
-                }
-            }
-
-            // 4. Приведение длины к чётной
-            if (line.Faces.Count % 2 != 0)
-            {
-                if (line.Head != null && line.Tail != null)
-                {
-                    bool removeHead = line.Head.Error > line.Tail.Error;
-
-                    var toRemove = removeHead ? line.Head : line.Tail;
-
-                    if (removeHead)
-                        line.Faces.RemoveFirst();
-                    else
-                        line.Faces.RemoveLast();
-
-                    line.FaceSet.Remove(toRemove);
-                    line.TotalError -= toRemove.Error;
-                }
-            }
-
-            // Проверка минимальной длины
-            if (line.Faces.Count < 2)
+            if (line == null || line.Faces.Count < 2)
             {
                 MessageBox.Show("Линия слишком короткая");
                 return;
             }
+
 
             // 5. Схлопывание
             collapser.Collapse(line);
