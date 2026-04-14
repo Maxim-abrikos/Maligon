@@ -9,12 +9,18 @@ namespace Maligon.WorkClasses
         public HashSet<int> VertexSet = new(); // теперь int!
         public HashSet<Face> FaceSet = new();
 
+        public float LastStepScore = 0f;
+        public bool HasLastStep = false;
+
         public float TotalError = 0;
 
         public Face Head => Faces.First?.Value;
         public Face Tail => Faces.Last?.Value;
 
         public bool CanGrow = true;
+
+
+        public HashSet<int> FaceIds = new();
 
 
         public float AreaMean;

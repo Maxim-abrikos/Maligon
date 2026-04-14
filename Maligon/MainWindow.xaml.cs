@@ -103,7 +103,12 @@ namespace Maligon
                 return;
             }
 
+            Debug.WriteLine($"Line faces: {line.Faces.Count}");
 
+            foreach (var f in line.Faces)
+            {
+                Debug.WriteLine(f.Id);
+            }
             // 5. Схлопывание
             collapser.Collapse(line);
 

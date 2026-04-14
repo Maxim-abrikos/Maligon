@@ -18,23 +18,15 @@ namespace Maligon.WorkClasses
             ComputeNeighbors(mesh);
             ComputeErrors(mesh);
 
-            foreach (var f in mesh.Faces.Take(20))
-            {
-                Debug.WriteLine(
-                    $"Face {f.Id}: neighbors = {string.Join(",", f.Neighbors)}"
-                );
-            }
-
             return mesh;
         }
 
 
-
         private static void ComputeNeighbors(MeshGraph mesh)
         {
-            // ключ: ребро (упорядоченное)
-            var edgeMap = new Dictionary<(int, int), int>();
+            var edgeMap = new Dictionary<(int, int), List<int>>();
 
+            // 1. Собираем все рёбра
             foreach (var face in mesh.Faces)
             {
                 var edges = new (int, int)[]
@@ -44,35 +36,143 @@ namespace Maligon.WorkClasses
             NormalizeEdge(face.V2, face.V0)
                 };
 
-                for (int i = 0; i < 3; i++)
+                foreach (var edge in edges)
                 {
-                    var edge = edges[i];
-
-                    if (edgeMap.TryGetValue(edge, out int otherFaceId))
+                    if (!edgeMap.TryGetValue(edge, out var list))
                     {
-                        // связываем два полигона
-                        var other = mesh.Faces[otherFaceId];
+                        list = new List<int>();
+                        edgeMap[edge] = list;
+                    }
 
-                        face.Neighbors[i] = other.Id;
+                    list.Add(face.Id);
+                }
+            }
 
-                        // находим индекс ребра у соседа
-                        for (int j = 0; j < 3; j++)
+            // 2. Обнуляем соседей
+            foreach (var face in mesh.Faces)
+            {
+                face.Neighbors = new int[] { -1, -1, -1 };
+            }
+
+            // 3. Назначаем соседей
+            foreach (var face in mesh.Faces)
+            {
+                var edges = new (int, int)[]
+                {
+            NormalizeEdge(face.V0, face.V1),
+            NormalizeEdge(face.V1, face.V2),
+            NormalizeEdge(face.V2, face.V0)
+                };
+
+                int index = 0;
+
+                foreach (var edge in edges)
+                {
+                    var connectedFaces = edgeMap[edge];
+
+                    foreach (var otherId in connectedFaces)
+                    {
+                        if (otherId == face.Id)
+                            continue;
+
+                        var other = mesh.Faces[otherId];
+
+                        // --- 🔴 ЛОГ ПРОВЕРКИ ГЕОМЕТРИИ ---
+                        var c1 = GetFaceCenter(face, mesh);
+                        var c2 = GetFaceCenter(other, mesh);
+
+                        float dist = Vector3.Distance(c1, c2);
+
+                        float maxDist = GetAdaptiveNeighborDistance(face, mesh);
+
+                        if (dist > maxDist)
+                            continue;
+                        // --- КОНЕЦ ЛОГА ---
+
+                        if (!face.Neighbors.Contains(otherId))
                         {
-                            var otherEdge = GetEdge(other, j);
-                            if (NormalizeEdge(otherEdge.Item1, otherEdge.Item2) == edge)
-                            {
-                                other.Neighbors[j] = face.Id;
+                            face.Neighbors[index++] = otherId;
+
+                            if (index >= 3)
                                 break;
-                            }
                         }
                     }
-                    else
-                    {
-                        edgeMap[edge] = face.Id;
-                    }
+
+                    if (index >= 3)
+                        break;
                 }
             }
         }
+
+        private static float GetAdaptiveNeighborDistance(Face f, MeshGraph mesh)
+        {
+            var v0 = mesh.Vertices[f.V0];
+            var v1 = mesh.Vertices[f.V1];
+            var v2 = mesh.Vertices[f.V2];
+
+            float e1 = Vector3.Distance(v0, v1);
+            float e2 = Vector3.Distance(v1, v2);
+            float e3 = Vector3.Distance(v2, v0);
+
+            float avgEdge = (e1 + e2 + e3) / 3f;
+
+            // 🔑 ключевая эвристика
+            return avgEdge * 2.0f;
+        }
+
+
+        private static Vector3 GetFaceCenter(Face f, MeshGraph mesh)
+        {
+            var v0 = mesh.Vertices[f.V0];
+            var v1 = mesh.Vertices[f.V1];
+            var v2 = mesh.Vertices[f.V2];
+
+            return (v0 + v1 + v2) / 3f;
+        }
+
+        //private static void ComputeNeighbors(MeshGraph mesh)
+        //{
+        //    // ключ: ребро (упорядоченное)
+        //    var edgeMap = new Dictionary<(int, int), int>();
+
+        //    foreach (var face in mesh.Faces)
+        //    {
+        //        var edges = new (int, int)[]
+        //        {
+        //    NormalizeEdge(face.V0, face.V1),
+        //    NormalizeEdge(face.V1, face.V2),
+        //    NormalizeEdge(face.V2, face.V0)
+        //        };
+
+        //        for (int i = 0; i < 3; i++)
+        //        {
+        //            var edge = edges[i];
+
+        //            if (edgeMap.TryGetValue(edge, out int otherFaceId))
+        //            {
+        //                // связываем два полигона
+        //                var other = mesh.Faces[otherFaceId];
+
+        //                face.Neighbors[i] = other.Id;
+
+        //                // находим индекс ребра у соседа
+        //                for (int j = 0; j < 3; j++)
+        //                {
+        //                    var otherEdge = GetEdge(other, j);
+        //                    if (NormalizeEdge(otherEdge.Item1, otherEdge.Item2) == edge)
+        //                    {
+        //                        other.Neighbors[j] = face.Id;
+        //                        break;
+        //                    }
+        //                }
+        //            }
+        //            else
+        //            {
+        //                edgeMap[edge] = face.Id;
+        //            }
+        //        }
+        //    }
+        //}
 
         private static (int, int) NormalizeEdge(int a, int b)
         {

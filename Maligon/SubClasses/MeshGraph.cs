@@ -82,38 +82,6 @@ namespace Maligon.SubClasses
                 Faces[f1].Neighbors[e1] = f0;
             }
         }
-        //private void BuildAdjacency()
-        //{
-        //    var edgeMap = new Dictionary<Edge, (int faceId, int edgeIndex)>();
-
-        //    for (int i = 0; i < Faces.Count; i++)
-        //    {
-        //        var f = Faces[i];
-
-        //        var edges = new[]
-        //        {
-        //    new Edge(f.V0, f.V1),
-        //    new Edge(f.V1, f.V2),
-        //    new Edge(f.V2, f.V0)
-        //        };
-
-        //        for (int e = 0; e < 3; e++)
-        //        {
-        //            var edge = edges[e];
-
-        //            if (edgeMap.TryGetValue(edge, out var other))
-        //            {
-        //                // связка
-        //                Faces[i].Neighbors[e] = other.faceId;
-        //                Faces[other.faceId].Neighbors[other.edgeIndex] = i;
-        //            }
-        //            else
-        //            {
-        //                edgeMap[edge] = (i, e);
-        //            }
-        //        }
-        //    }
-        //}
 
     }
 }

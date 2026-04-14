@@ -58,8 +58,6 @@ namespace Maligon
             }
         }
 
-        // ----------------------------
-
         private static MeshGeometry3D BuildGeometry(MeshData mesh)
         {
             var geometry = new MeshGeometry3D();
@@ -96,7 +94,7 @@ namespace Maligon
 
     public sealed class LodMesh
     {
-        public string Name { get; set; }   // LOD0, LOD1
+        public string Name { get; set; }
         public MeshData Mesh { get; set; }
 
         public int VertexCount => Mesh.Vertices.Length;

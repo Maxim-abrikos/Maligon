@@ -14,7 +14,22 @@ namespace Maligon
     {
         private readonly AssimpContext _context = new();
 
+
+
         public ModelImportResult Load(string sourcePath)
+        {
+            string ext = Path.GetExtension(sourcePath).ToLowerInvariant();
+
+            if (ext == ".gltf" || ext == ".glb")
+            {
+                return LoadWithSharpGLTF(sourcePath);
+            }
+
+            return LoadWithAssimp(sourcePath);
+        }
+
+
+        private ModelImportResult LoadWithAssimp(string sourcePath)
         {
             Scene scene;
 
@@ -38,21 +53,105 @@ namespace Maligon
             RenameMeshesAsLods(scene);
 
             if (scene == null || !scene.HasMeshes)
-                throw new InvalidOperationException(
-                    "Файл загружен, но меши отсутствуют");
+                throw new InvalidOperationException("Меши отсутствуют");
 
             string gltfPath = EnsureGltf(scene, sourcePath);
             var lodModel = ConvertSceneToLodModel(scene);
+
             return new ModelImportResult
             {
                 GltfPath = gltfPath,
                 WorkingDirectory = Path.GetDirectoryName(gltfPath)!,
-
                 LodModel = lodModel,
                 Mesh = lodModel.Lods.First().Mesh
             };
         }
 
+
+        private ModelImportResult LoadWithSharpGLTF(string path)
+        {
+            var model = SharpGLTF.Schema2.ModelRoot.Load(path);
+
+            var lodModel = new LodModel();
+
+            int lodIndex = 0;
+
+            foreach (var mesh in model.LogicalMeshes)
+            {
+                var meshData = ConvertSharpMeshToMeshData(mesh);
+
+                lodModel.Lods.Add(new LodMesh
+                {
+                    Mesh = meshData
+                });
+
+                lodIndex++;
+            }
+
+            if (lodModel.Lods.Count == 0)
+                throw new InvalidOperationException("GLTF не содержит мешей");
+
+            return new ModelImportResult
+            {
+                GltfPath = path,
+                WorkingDirectory = Path.GetDirectoryName(path)!,
+                LodModel = lodModel,
+                Mesh = lodModel.Lods.First().Mesh
+            };
+        }
+
+        private MeshData ConvertSharpMeshToMeshData(SharpGLTF.Schema2.Mesh mesh)
+        {
+            var vertices = new List<Vector3>();
+            var normals = new List<Vector3>();
+            var uvs = new List<Vector2>();
+            var indices = new List<int>();
+
+            foreach (var prim in mesh.Primitives)
+            {
+                var posAccessor = prim.GetVertexAccessor("POSITION");
+                var normAccessor = prim.GetVertexAccessor("NORMAL");
+                var uvAccessor = prim.GetVertexAccessor("TEXCOORD_0");
+
+                var positions = posAccessor.AsVector3Array();
+                var norms = normAccessor != null ? normAccessor.AsVector3Array() : null;
+                var tex = uvAccessor != null ? uvAccessor.AsVector2Array() : null;
+
+                int baseIndex = vertices.Count;
+
+                for (int i = 0; i < positions.Count; i++)
+                {
+                    vertices.Add(positions[i]);
+
+                    if (norms != null && i < norms.Count)
+                        normals.Add(norms[i]);
+                    else
+                        normals.Add(Vector3.UnitY);
+
+                    if (tex != null && i < tex.Count)
+                        uvs.Add(tex[i]);
+                    else
+                        uvs.Add(Vector2.Zero);
+                }
+
+                var idx = prim.GetIndices();
+
+                foreach (var i in idx)
+                {
+                    indices.Add(baseIndex + (int)i);
+                }
+            }
+
+            return new MeshData
+            {
+                Vertices = vertices.ToArray(),
+                Normals = normals.ToArray(),
+                UVs = uvs.ToArray(),
+                Indices = indices.ToArray()
+            };
+        }
+
+      
         private string CreateWorkingDirectory()
         {
             string dir = Path.Combine(
@@ -111,7 +210,6 @@ namespace Maligon
                 return targetGltfPath;
             }
 
-            // 🔥 ВАЖНО: всегда экспортируем заново
             _context.ExportFile(scene, targetGltfPath, "gltf2");
 
             FixGltfBufferUri(targetGltfPath);
@@ -176,23 +274,6 @@ namespace Maligon
             }));
         }
 
-
-
-        //public void Export(ModelImportResult model, string targetDirectory)
-        //{
-        //    Directory.CreateDirectory(targetDirectory);
-
-        //    foreach (var file in Directory.GetFiles(model.WorkingDirectory))
-        //    {
-        //        string dest = Path.Combine(
-        //            targetDirectory,
-        //            Path.GetFileName(file)
-        //        );
-
-        //        File.Copy(file, dest, true);
-        //    }
-        //}
-
         public void Export(ModelImportResult model, string targetDirectory)
         {
             Directory.CreateDirectory(targetDirectory);
@@ -211,12 +292,12 @@ namespace Maligon
 
                 scene.AddRigidMesh(mesh, node);
 
-                root.AddNode(node); // 🔥 ВАЖНО
+                root.AddNode(node);
 
                 lodIndex++;
             }
 
-            scene.AddNode(root); // 🔥 ВАЖНО
+            scene.AddNode(root);
 
             var sourceName = Path.GetFileNameWithoutExtension(model.GltfPath);
             string path = Path.Combine(targetDirectory, sourceName + ".gltf");
@@ -271,50 +352,7 @@ namespace Maligon
         }
 
 
-        private Assimp.Mesh ConvertToAssimpMesh(MeshData data)
-        {
-            var mesh = new Assimp.Mesh(PrimitiveType.Triangle);
-
-            // ВЕРШИНЫ
-            foreach (var v in data.Vertices)
-                mesh.Vertices.Add(new Assimp.Vector3D(v.X, v.Y, v.Z));
-
-            // НОРМАЛИ
-            if (data.Normals != null && data.Normals.Length == data.Vertices.Length)
-            {
-                foreach (var n in data.Normals)
-                    mesh.Normals.Add(new Assimp.Vector3D(n.X, n.Y, n.Z));
-            }
-
-            // UV (🔥 ПРАВИЛЬНО)
-            if (data.UVs != null && data.UVs.Length == data.Vertices.Length)
-            {
-                mesh.TextureCoordinateChannels[0] = new List<Assimp.Vector3D>();
-
-                foreach (var uv in data.UVs)
-                {
-                    mesh.TextureCoordinateChannels[0].Add(
-                        new Assimp.Vector3D(uv.X, uv.Y, 0));
-                }
-
-                mesh.UVComponentCount[0] = 2;
-            }
-
-            // ИНДЕКСЫ
-            for (int i = 0; i < data.Indices.Length; i += 3)
-            {
-                var face = new Face();
-                face.Indices.Add(data.Indices[i]);
-                face.Indices.Add(data.Indices[i + 1]);
-                face.Indices.Add(data.Indices[i + 2]);
-
-                mesh.Faces.Add(face);
-            }
-
-            return mesh;
-        }
-
-
+        
         private LodModel ConvertSceneToLodModel(Scene scene)
         {
             var result = new LodModel();

@@ -12,10 +12,6 @@ namespace Maligon.WorkClasses
             return new[] { f.V0, f.V1, f.V2 };
         }
 
-        //public static bool IsNeighbor(Face a, Face b)
-        //{
-        //    return a.Neighbors.Contains(b.Id);
-        //}
         public static bool IsNeighbor(Face a, Face b)
         {
             return a.Neighbors.Contains(b.Id) || b.Neighbors.Contains(a.Id);
