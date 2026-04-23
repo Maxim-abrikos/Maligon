@@ -15,7 +15,6 @@ namespace Maligon
         private readonly AssimpContext _context = new();
 
 
-
         public ModelImportResult Load(string sourcePath)
         {
             string ext = Path.GetExtension(sourcePath).ToLowerInvariant();

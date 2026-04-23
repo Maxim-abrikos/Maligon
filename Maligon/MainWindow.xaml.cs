@@ -92,25 +92,23 @@ namespace Maligon
             var mesh = MeshConverter.ToMeshGraph(_selectedLod.Mesh);
 
             var occupancy = new OccupancyMap();
-            var builder = new LineBuilder(mesh, occupancy);
+
+
+            //Вот тут может быть ссанина
+
+            var analyzer = new MeshStructureAnalyzer(mesh, occupancy);
             var collapser = new LineCollapser(mesh);
 
-            var line = builder.BuildLine();
+            // 1. Анализ сетки
+            analyzer.Analyze();
+            var line = analyzer.BuildLine();
 
-            if (line == null || line.Faces.Count < 2)
+            if (line != null && line.Faces.Count > 1)
             {
-                MessageBox.Show("Линия слишком короткая");
-                return;
+                collapser.Collapse(line);
+                MessageBox.Show(line.Faces.Count().ToString());
             }
-
-            Debug.WriteLine($"Line faces: {line.Faces.Count}");
-
-            foreach (var f in line.Faces)
-            {
-                Debug.WriteLine(f.Id);
-            }
-            // 5. Схлопывание
-            collapser.Collapse(line);
+            
 
             // 6. Обратная конвертация
             var newMeshData = MeshConverter.ToMeshData(mesh);
@@ -134,8 +132,11 @@ namespace Maligon
             // отображаем
             _presenter.Show(newMeshData);
 
-            MessageBox.Show($"Схлопнуто полигонов: {line.Faces.Count}");
+            //MessageBox.Show($"Схлопнуто полигонов: {line.Faces.Count}");
         }
+
+
+
         private void LeaveDDZone(object sender, DragEventArgs e)
         {
             if (IsLoaded)

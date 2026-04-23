@@ -9,7 +9,7 @@ using System.Numerics;
 
 namespace Maligon.WorkClasses
 {
-    class LineBuilder
+    public class LineBuilder
     {
         private MeshGraph _mesh;
         private OccupancyMap _occupancy;
@@ -20,486 +20,351 @@ namespace Maligon.WorkClasses
             _occupancy = occupancy;
         }
 
-
-
-        public OptimizationLine BuildLine(int maxIterations = 200)
+        public OptimizationLine BuildLine()
         {
-            Debug.WriteLine($"--- NEW LINE START: блять");
-            ComputeAreaSimilarity();
-
-            // 1. старт
-            var start = _mesh.Faces
-                .Where(f => !f.IsUsed)
-                .OrderBy(f => f.AreaSimilarity)
-                .FirstOrDefault();
+            var start = FindBestStart();
 
             if (start == null)
                 return null;
 
             var line = new OptimizationLine();
 
-            AddFace(line, start, true, 0f);
+            AddFace(line, start, toHead: true);
 
-            // 2. выбрать второго
-            var firstNeighborId = start.Neighbors.FirstOrDefault(n => n >= 0);
+            // пробуем взять второго (любой нормальный сосед)
+            var second = GetBestNeighbor(start);
+            if (second == null)
+                return line; // хотя бы 1 полигон
 
-            if (firstNeighborId < 0)
-                return line;
+            AddFace(line, second, toHead: false);
 
-            var second = _mesh.Faces[firstNeighborId];
+            if (second != null)
+                AddFace(line, second, toHead: false);
 
-            float secondScore = EvaluateCandidate(second, line, false);
-            AddFace(line, second, false, secondScore);
-
-            // направление
-            line.LastDirection = GetDirection(start, second);
-
-            line.RecalculateAreaMean();
-
-            int iterations = 0;
-
-            // 3. рост
-            while (iterations++ < maxIterations)
+            // рост линии
+            while (true)
             {
                 var next = SelectBestCandidate(line);
 
                 if (next == null)
                     break;
 
-                float score = EvaluateCandidate(
-    next.Value.face,
-    line,
-    next.Value.toHead
-);
-
-                AddFace(line, next.Value.face, next.Value.toHead, score);
-
-                UpdateLineState(line, next.Value.face);
+                AddFace(line, next.Value.face, next.Value.toHead);
             }
 
             return line;
         }
 
+        // =====================================================
 
-        private void UpdateLineState(OptimizationLine line, Face newFace)
+        private Face FindBestStart()
         {
-            if (line.Faces.Count < 2)
-                return;
-
-            var last = line.Faces.Last.Value;
-            var prev = line.Faces.Last.Previous?.Value;
-
-            if (prev == null) return;
-
-            var newDir = GetDirection(prev, last);
-
-            if (line.Faces.Count >= 4)
-            {
-                float k = SignedCurvature(line.LastDirection, newDir, prev.Normal);
-
-                line.RecentCurvatures.Enqueue(k);
-
-                if (line.RecentCurvatures.Count > 5)
-                    line.RecentCurvatures.Dequeue();
-            }
-
-            line.LastDirection = newDir;
-
-            line.RecalculateAreaMean();
-        }
-
-
-
-        private Vector3 GetDirection(Face a, Face b)
-        {
-            var ca = GetFaceCenter(a);
-            var cb = GetFaceCenter(b);
-
-            var dir = cb - ca;
-            return Vector3.Normalize(dir);
-        }
-
-
-
-        private float SignedCurvature(Vector3 prevDir, Vector3 newDir, Vector3 normal)
-        {
-            var cross = Vector3.Cross(prevDir, newDir);
-            float sign = Math.Sign(Vector3.Dot(cross, normal));
-
-            float angle = AngleBetween(prevDir, newDir);
-
-            return angle * sign;
-        }
-
-        public (Face face, bool toHead)? SelectBestCandidate(OptimizationLine line)
-        {
-            if (line.Head == null || line.Tail == null)
-                return null;
-
-            Face bestFace = null;
-            bool bestToHead = false;
+            Face best = null;
             float bestScore = float.MaxValue;
 
-            // --- локальная функция проверки топологии ---
-            bool IsTopologicallyValid(Face candidate, Face anchor)
+            foreach (var f in _mesh.Faces)
             {
-                var candidateNeighbors = MeshUtils.GetNeighbors(candidate, _mesh);
+                if (_occupancy.UsedFaces.Contains(f))
+                    continue;
 
-                foreach (var n in candidateNeighbors)
+                var neighbors = MeshUtils.GetNeighbors(f, _mesh);
+
+                if (neighbors.Count == 0)
+                    continue;
+
+                float sum = 0;
+
+                foreach (var n in neighbors)
                 {
-                    // если сосед уже в линии
-                    if (line.FaceSet.Contains(n))
-                    {
-                        // допускается только если это anchor
-                        if (n != anchor)
-                            return false;
-                    }
+                    float err = Math.Abs(f.Area - n.Area) / (f.Area + 1e-6f);
+                    sum += err;
                 }
 
-                return true;
-            }
-
-            // --- проверка кандидатов для Head ---
-            var headCandidates = MeshUtils.GetNeighbors(line.Head, _mesh);
-
-            foreach (var f in headCandidates)
-            {
-                if (line.FaceSet.Contains(f))
-                    continue;
-
-                if (!IsTopologicallyValid(f, line.Head))
-                    continue;
-
-                float score = EvaluateCandidate(f, line, true);
-
-                if (score < bestScore)
+                if (sum < bestScore)
                 {
-                    bestScore = score;
-                    bestFace = f;
-                    bestToHead = true;
+                    bestScore = sum;
+                    best = f;
                 }
             }
 
-            // --- проверка кандидатов для Tail ---
-            var tailCandidates = MeshUtils.GetNeighbors(line.Tail, _mesh);
-
-            foreach (var f in tailCandidates)
-            {
-                if (line.FaceSet.Contains(f))
-                    continue;
-
-                if (!IsTopologicallyValid(f, line.Tail))
-                    continue;
-
-                float score = EvaluateCandidate(f, line, false);
-
-                if (score < bestScore)
-                {
-                    bestScore = score;
-                    bestFace = f;
-                    bestToHead = false;
-                }
-            }
-
-            if (bestFace == null)
-                return null;
-
-            // --- 🔴 АДАПТИВНАЯ ОСТАНОВКА ---
-
-            if (line.HasLastStep)
-            {
-                // если качество резко ухудшилось — останавливаем линию
-                // включаем контроль только когда линия сформировалась
-                if (line.HasLastStep && line.Faces.Count >= 4)
-                {
-                    float prev = line.LastStepScore;
-
-                    // защита от нулевых значений
-                    if (prev > 1e-6f)
-                    {
-                        if (bestScore > prev * 2.0f)
-                        {
-                            Debug.WriteLine($"⛔ STOP: score jump {prev} -> {bestScore}");
-                            return null;
-                        }
-                    }
-                }
-            }
-
-            return (bestFace, bestToHead);
-
-            return (bestFace, bestToHead);
+            return best;
         }
 
-        //public (Face face, bool toHead)? SelectBestCandidate(OptimizationLine line)
+        // =====================================================
+        private Face GetBestNeighbor(Face f)
+        {
+            Face best = null;
+            float bestScore = float.MaxValue;
+
+            foreach (var n in MeshUtils.GetNeighbors(f, _mesh))
+            {
+                if (_occupancy.UsedFaces.Contains(n))
+                    continue;
+
+                if (MeshUtils.GetSharedEdge(f, n, _mesh) == null)
+                    continue;
+
+                float score = Math.Abs(n.Area - f.Area) / (f.Area + 1e-6f);
+
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = n;
+                }
+            }
+
+            return best;
+        }
+        //private Face GetBestNeighbor(Face f, float refArea)
         //{
-        //    if (line.Head == null || line.Tail == null)
-        //        return null;
+        //    Face best = null;
+        //    float bestErr = float.MaxValue;
 
-        //    float tauArea = 0.2f;
-        //    float tauDir = 0.0f;
-        //    float tauCurv = 0.3f;
-        //    //float tauArea = 1.0f;     // было 0.2
-        //    //float tauDir = -0.5f;     // было 0.0
-        //    //float tauCurv = 1.0f;     // было 0.3
-
-        //    var headCandidates = MeshUtils.GetNeighbors(line.Head, _mesh)
-        //        .Where(f => !line.FaceSet.Contains(f) && !IsBacktracking(f, line))
-        //        .ToList();
-
-        //    var tailCandidates = MeshUtils.GetNeighbors(line.Tail, _mesh)
-        //        .Where(f => !line.FaceSet.Contains(f) && !IsBacktracking(f, line))
-        //        .ToList();
-
-        //    var allCandidates = new List<(Face face, bool toHead)>();
-        //    allCandidates.AddRange(headCandidates.Select(f => (f, true)));
-        //    allCandidates.AddRange(tailCandidates.Select(f => (f, false)));
-
-        //    List<(Face face, bool toHead)> valid = new();
-
-        //    foreach (var c in allCandidates)
+        //    foreach (var n in MeshUtils.GetNeighbors(f, _mesh))
         //    {
-
-        //        var f = c.face;
-
-        //        if (f.Id == line.Head.Id || f.Id == line.Tail.Id)
+        //        if (_occupancy.UsedFaces.Contains(n))
         //            continue;
 
-        //        // 🔴 ЗАЩИТА ОТ ДУБЛИКАТОВ ПО ID
-        //        if (line.FaceIds.Contains(f.Id))
+        //        if (MeshUtils.GetSharedEdge(f, n) == null)
         //            continue;
 
-        //        if (f.IsUsed)
-        //            continue;
+        //        float err = Math.Abs(n.Area - refArea) / (refArea + 1e-6f);
 
-        //        // площадь
-        //        float areaDiff = Math.Abs(f.Area - line.AreaMean) / (line.AreaMean + 1e-6f);
-        //        if (areaDiff > tauArea)
-        //            continue;
-
-        //        // направление
-        //        var current = c.toHead ? line.Head : line.Tail;
-        //        var newDir = GetDirection(current, f);
-
-        //        float dot = Vector3.Dot(line.LastDirection, newDir);
-        //        if (dot < tauDir)
-        //            continue;
-
-        //        //curvature
-        //        if (line.Faces.Count >= 4)
+        //        if (err < 0.15f && err < bestErr)
         //        {
-        //            float kNew = SignedCurvature(line.LastDirection, newDir, current.Normal);
-        //            float kExpected = line.GetExpectedCurvature();
-
-        //            float curvError = Math.Abs(kNew - kExpected);
-
-        //            if (curvError > tauCurv)
-        //                continue;
-        //        }
-
-        //        valid.Add(c);
-        //    }
-
-        //    // fallback
-        //    if (valid.Count == 0)
-        //    {
-        //        foreach (var c in allCandidates)
-        //        {
-        //            if (!c.face.IsUsed)
-        //                valid.Add(c);
-        //        }
-
-        //        if (valid.Count == 0)
-        //            return null;
-        //    }
-
-        //    // выбор
-        //    (Face face, bool toHead)? best = null;
-
-        //    float bestCurv = float.MaxValue;
-        //    float bestDot = -1f;
-
-        //    foreach (var c in valid)
-        //    {
-        //        var current = c.toHead ? line.Head : line.Tail;
-        //        var newDir = GetDirection(current, c.face);
-
-        //        float dot = Vector3.Dot(line.LastDirection, newDir);
-
-        //        float curvError = 0f;
-
-        //        if (line.Faces.Count >= 4)
-        //        {
-        //            float kNew = SignedCurvature(line.LastDirection, newDir, current.Normal);
-        //            float kExpected = line.GetExpectedCurvature();
-
-        //            curvError = Math.Abs(kNew - kExpected);
-        //        }
-
-        //        if (curvError < bestCurv ||
-        //           (Math.Abs(curvError - bestCurv) < 1e-5f && dot > bestDot))
-        //        {
-        //            bestCurv = curvError;
-        //            bestDot = dot;
-        //            best = c;
+        //            bestErr = err;
+        //            best = n;
         //        }
         //    }
 
         //    return best;
         //}
 
-        private float EvaluateCandidate(Face f, OptimizationLine line, bool toHead)
+        // =====================================================
+
+        private (Face face, bool toHead)? SelectBestCandidate(OptimizationLine line)
         {
-            // --- 1. ПЛОЩАДЬ (относительное отклонение от среднего) ---
-            float areaMean = line.Faces.Average(face => face.Area);
-            float areaDiff = Math.Abs(f.Area - areaMean) / (areaMean + 1e-6f);
+            var candidates = new List<(Face face, bool toHead)>();
 
-            // --- 2. НАПРАВЛЕНИЕ ---
-            float dirPenalty = 0f;
-
-            if (line.Faces.Count >= 2)
+            // --- два конца линии ---
+            var ends = new[]
             {
-                var anchor = toHead ? line.Head : line.Tail;
+        (face: line.Head, toHead: true),
+        (face: line.Tail, toHead: false)
+    };
 
-                var p0 = GetFaceCenter(anchor);
-                var p1 = GetFaceCenter(f);
-
-                var newDir = Vector3.Normalize(p1 - p0);
-
-                var prev = toHead
-                    ? line.Faces.Skip(1).FirstOrDefault()
-                    : line.Faces.Reverse().Skip(1).FirstOrDefault();
-
-                if (prev != null)
-                {
-                    var pPrev = GetFaceCenter(prev);
-                    var prevDir = Vector3.Normalize(p0 - pPrev);
-
-                    float dot = Vector3.Dot(prevDir, newDir);
-
-                    // штраф за отклонение от прямой
-                    dirPenalty = 1f - dot; // 0 = идеально, 2 = противоположно
-                }
-            }
-
-            // --- 3. КРИВИЗНА ---
-            float curvaturePenalty = 0f;
-
-            if (line.Faces.Count >= 3)
+            foreach (var (endFace, toHead) in ends)
             {
-                var anchor = toHead ? line.Head : line.Tail;
+                if (endFace == null)
+                    continue;
 
-                var p0 = GetFaceCenter(anchor);
-                var p1 = GetFaceCenter(f);
-
-                var newDir = Vector3.Normalize(p1 - p0);
-
-                var prev = toHead
-                    ? line.Faces.Skip(1).FirstOrDefault()
-                    : line.Faces.Reverse().Skip(1).FirstOrDefault();
-
-                if (prev != null)
+                foreach (var nId in endFace.Neighbors)
                 {
-                    var pPrev = GetFaceCenter(prev);
-                    var prevDir = Vector3.Normalize(p0 - pPrev);
-
-                    var cross = Vector3.Cross(prevDir, newDir);
-
-                    float curvature = cross.Length(); // величина изгиба
-
-                    curvaturePenalty = curvature;
-                }
-            }
-
-            // --- ИТОГОВЫЙ СКОР ---
-            // БЕЗ весов — просто сумма (как ты хотел)
-            return areaDiff + dirPenalty + curvaturePenalty;
-        }
-
-        private Vector3 GetAverageNormal(OptimizationLine line)
-        {
-            Vector3 sum = Vector3.Zero;
-
-            foreach (var f in line.Faces)
-                sum += f.Normal;
-
-            if (sum.LengthSquared() > 0)
-                sum = Vector3.Normalize(sum);
-
-            return sum;
-        }
-
-        public void ComputeAreaSimilarity()
-        {
-            foreach (var f in _mesh.Faces)
-            {
-                float sum = 0f;
-                int count = 0;
-
-                for (int i = 0; i < 3; i++)
-                {
-                    int nId = f.Neighbors[i];
                     if (nId < 0) continue;
 
-                    var n = _mesh.Faces[nId];
+                    var f = _mesh.Faces[nId];
 
-                    float diff = Math.Abs(f.Area - n.Area) / (f.Area + 1e-6f);
-                    sum += diff;
-                    count++;
+                    if (f.IsUsed) continue;
+                    if (line.FaceSet.Contains(f)) continue;
+
+                    // 🔴 главный фикс — топология
+                    if (!IsValidTopologically(line, f, toHead))
+                        continue;
+
+                    candidates.Add((f, toHead));
                 }
-
-                f.AreaSimilarity = count > 0 ? sum / count : float.MaxValue;
             }
+
+            if (candidates.Count == 0)
+                return null;
+
+            // =====================================================
+            // 🔴 СТАРТОВЫЙ СЛУЧАЙ (нужно гарантировать 2 полигона)
+            // =====================================================
+            if (line.Faces.Count == 1)
+            {
+                var start = line.Head;
+
+                var best = candidates
+                    .OrderBy(c =>
+                        Math.Abs(c.face.Area - start.Area) / (start.Area + 1e-6f))
+                    .First();
+
+                return best;
+            }
+
+            // =====================================================
+            // 🔴 ОСНОВНОЙ ФИЛЬТР ПО ПЛОЩАДИ
+            // =====================================================
+
+            float tauArea = 0.30f; // ослабленный фильтр
+
+            float meanArea = line.AreaMean;
+
+            var areaFiltered = candidates
+                .Where(c =>
+                {
+                    float err = Math.Abs(c.face.Area - meanArea) / (meanArea + 1e-6f);
+                    return err < tauArea;
+                })
+                .ToList();
+
+            // 🔴 fallback — не душим линию
+            if (areaFiltered.Count == 0)
+                return candidates.First();
+
+            // =====================================================
+            // 🔴 ВЫБОР ЛУЧШЕГО
+            // =====================================================
+
+            var bestCandidate = areaFiltered
+                .OrderBy(c =>
+                    Math.Abs(c.face.Area - meanArea) / (meanArea + 1e-6f))
+                .First();
+
+            return bestCandidate;
         }
-        private float AngleBetween(Vector3 a, Vector3 b)
+
+        // =====================================================
+        private float AreaError(Face f, OptimizationLine line)
         {
-            a = Vector3.Normalize(a);
-            b = Vector3.Normalize(b);
+            float mean = line.AreaMean;
 
-            float dot = Vector3.Dot(a, b);
-            dot = Math.Clamp(dot, -1f, 1f);
+            if (mean < 1e-6f)
+                return 0f;
 
-            return (float)Math.Acos(dot);
+            return Math.Abs(f.Area - mean) / mean;
         }
 
-        private Vector3 GetFaceCenter(Face f)
+        private Face SelectByArea(List<Face> candidates, OptimizationLine line)
         {
-            var v0 = _mesh.Vertices[f.V0];
-            var v1 = _mesh.Vertices[f.V1];
-            var v2 = _mesh.Vertices[f.V2];
+            if (candidates.Count == 0)
+                return null;
 
-            return (v0 + v1 + v2) / 3f;
+            float tau = 0.3f;
+
+            Face best = null;
+            float bestErr = float.MaxValue;
+
+            foreach (var f in candidates)
+            {
+                float err = AreaError(f, line);
+
+                if (err > tau)
+                    continue;
+
+                if (err < bestErr)
+                {
+                    bestErr = err;
+                    best = f;
+                }
+            }
+
+            return best;
         }
 
-        private bool IsBacktracking(Face candidate, OptimizationLine line)
+
+        private bool IsValidTopologically(OptimizationLine line, Face candidate, bool toHead)
         {
-            if (line.Faces.Count < 2)
+            var head = line.Head;
+            var tail = line.Tail;
+
+            int sharedCount = 0;
+            (int, int)? sharedEdge = null;
+
+            foreach (var f in line.Faces)
+            {
+                var shared = MeshUtils.GetSharedEdge(f, candidate);
+
+                if (shared != null)
+                {
+                    sharedCount++;
+                    sharedEdge = shared;
+                }
+            }
+
+            // 🔴 нельзя иметь больше одной общей грани
+            if (sharedCount > 1)
                 return false;
 
-            // предпоследний элемент с головы
-            var secondFromHead = line.Faces.First.Next?.Value;
+            bool isNeighborHead = head != null && MeshUtils.GetSharedEdge(head, candidate) != null;
+            bool isNeighborTail = tail != null && MeshUtils.GetSharedEdge(tail, candidate) != null;
 
-            // предпоследний с хвоста
-            var secondFromTail = line.Faces.Last.Previous?.Value;
+            // 🔴 должен быть соседом нужного конца
+            if (toHead && !isNeighborHead)
+                return false;
 
-            return candidate == secondFromHead || candidate == secondFromTail;
-        }
-        public void AddFace(OptimizationLine line, Face f, bool toHead, float stepScore)
-        {
+            if (!toHead && !isNeighborTail)
+                return false;
 
-            if (line.Faces.Count > 0)
+            // 🔴 запрет на замыкание
+            if (isNeighborHead && isNeighborTail)
+                return false;
+
+            // =====================================================
+            // 🔴 НОВЫЙ КРИТИЧЕСКИЙ ФИЛЬТР
+            // =====================================================
+
+            if (sharedEdge != null)
             {
-                var anchor = toHead ? line.Head : line.Tail;
+                var verts = MeshUtils.GetVertices(candidate);
 
-                var neighbors = MeshUtils.GetNeighbors(anchor, _mesh);
-
-                if (!neighbors.Contains(f))
+                foreach (var v in verts)
                 {
-                    Debug.WriteLine($"❌ INVALID ADD: {anchor.Id} -> {f.Id}");
+                    // вершины ребра пропускаем
+                    if (v == sharedEdge.Value.Item1 || v == sharedEdge.Value.Item2)
+                        continue;
+
+                    // 🔴 третья вершина уже в линии → нельзя
+                    if (line.VertexSet.Contains(v))
+                        return false;
                 }
             }
 
+            return true;
+        }
+        //private bool IsValidTopologically(OptimizationLine line, Face candidate, bool toHead)
+        //{
+        //    var head = line.Head;
+        //    var tail = line.Tail;
 
+        //    int sharedCount = 0;
+
+        //    foreach (var f in line.Faces)
+        //    {
+        //        var shared = MeshUtils.GetSharedEdge(f, candidate);
+
+        //        if (shared != null)
+        //            sharedCount++;
+        //    }
+
+        //    // 🔴 нельзя иметь больше одной общей грани с линией
+        //    if (sharedCount > 1)
+        //        return false;
+
+        //    bool isNeighborHead = head != null && MeshUtils.GetSharedEdge(head, candidate) != null;
+        //    bool isNeighborTail = tail != null && MeshUtils.GetSharedEdge(tail, candidate) != null;
+
+        //    // 🔴 должен быть соседом нужного конца
+        //    if (toHead && !isNeighborHead)
+        //        return false;
+
+        //    if (!toHead && !isNeighborTail)
+        //        return false;
+
+        //    // 🔴 запрет на замыкание
+        //    if (isNeighborHead && isNeighborTail)
+        //        return false;
+
+        //    return true;
+        //}
+
+
+
+
+
+        private void AddFace(OptimizationLine line, Face f, bool toHead)
+        {
             if (line.Faces.Count == 0)
             {
                 line.Faces.AddFirst(f);
@@ -514,29 +379,59 @@ namespace Maligon.WorkClasses
             }
 
             line.FaceSet.Add(f);
-            line.FaceIds.Add(f.Id);
-
-            foreach (var v in MeshUtils.GetVertices(f))
-                line.VertexSet.Add(v);
+            line.RegisterFaceVertices(f);
 
             line.TotalError += f.Error;
 
-            line.LastStepScore = stepScore;
-            line.HasLastStep = true;
+            line.RecalculateAreaMean();
         }
 
-        public void EnsureEvenLength(OptimizationLine line)
+        private static Vector3 GetFaceCenter(Face f, MeshGraph mesh)
         {
-            if (line.Faces.Count % 2 != 0)
+            var v0 = mesh.Vertices[f.V0];
+            var v1 = mesh.Vertices[f.V1];
+            var v2 = mesh.Vertices[f.V2];
+
+            return (v0 + v1 + v2) / 3f;
+        }
+
+        private bool SharesVertexWithNonEdge(Face candidate, OptimizationLine line, bool toHead)
+        {
+            var verts = MeshUtils.GetVertices(candidate);
+
+            Face edgeFace = toHead ? line.Head : line.Tail;
+
+            foreach (var face in line.FaceSet)
             {
-                var last = line.Faces.Last.Value;
+                if (face == edgeFace)
+                    continue;
 
-                line.Faces.RemoveLast();
-                line.FaceSet.Remove(last);
+                var fVerts = MeshUtils.GetVertices(face);
 
-                foreach (var v in MeshUtils.GetVertices(last))
-                    line.VertexSet.Remove(v);
+                foreach (var v in verts)
+                {
+                    if (fVerts.Contains(v))
+                        return true; // 🔴 делит вершину с серединой линии
+                }
             }
+
+            return false;
+        }
+
+
+        private bool IsNeighborOfLineInterior(Face candidate, OptimizationLine line)
+        {
+            foreach (var face in line.FaceSet)
+            {
+                // пропускаем только края линии
+                if (face == line.Head || face == line.Tail)
+                    continue;
+
+                if (MeshUtils.GetNeighbors(face, _mesh).Contains(candidate))
+                    return true;
+            }
+
+            return false;
         }
 
         public void RemoveFace(OptimizationLine line, bool fromHead)
@@ -563,7 +458,5 @@ namespace Maligon.WorkClasses
                 line.TotalError -= face.Error;
             }
         }
-
-
     }
 }

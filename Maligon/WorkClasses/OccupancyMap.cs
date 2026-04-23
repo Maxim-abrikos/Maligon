@@ -6,7 +6,7 @@ using Maligon.SubClasses;
 
 namespace Maligon.WorkClasses
 {
-    class OccupancyMap
+    public class OccupancyMap
     {
         public HashSet<Face> UsedFaces = new();
         public HashSet<int> UsedVertices = new();

@@ -1,7 +1,5 @@
 ﻿using Maligon.SubClasses;
-using System;
-using System.Collections.Generic;
-using System.Text;
+using System.Numerics;
 
 namespace Maligon.WorkClasses
 {
@@ -10,6 +8,15 @@ namespace Maligon.WorkClasses
         public static int[] GetVertices(Face f)
         {
             return new[] { f.V0, f.V1, f.V2 };
+        }
+
+        public static Vector3 GetFaceCenter(Face f, MeshGraph mesh)
+        {
+            var v0 = mesh.Vertices[f.V0];
+            var v1 = mesh.Vertices[f.V1];
+            var v2 = mesh.Vertices[f.V2];
+
+            return (v0 + v1 + v2) / 3f;
         }
 
         public static bool IsNeighbor(Face a, Face b)
@@ -30,14 +37,57 @@ namespace Maligon.WorkClasses
             return result;
         }
 
-        public static (int, int) GetSharedEdge(Face a, Face b)
+        public static (int, int)? GetSharedEdge(Face a, Face b, MeshGraph mesh)
+        {
+            var aVerts = GetVertices(a);
+            var bVerts = GetVertices(b);
+
+            var shared = new List<int>();
+
+            const float eps = 1e-6f;
+
+            foreach (var va in aVerts)
+            {
+                var pa = mesh.Vertices[va];
+
+                foreach (var vb in bVerts)
+                {
+                    var pb = mesh.Vertices[vb];
+
+                    if (Vector3.Distance(pa, pb) < eps)
+                    {
+                        shared.Add(va);
+                        break;
+                    }
+                }
+            }
+
+            if (shared.Count != 2)
+                return null;
+
+            return (shared[0], shared[1]);
+        }
+        public static (int, int)? GetSharedEdge(Face a, Face b)
         {
             var aVerts = GetVertices(a);
             var bVerts = GetVertices(b);
 
             var shared = aVerts.Intersect(bVerts).ToArray();
 
+            if (shared.Length < 2)
+                return null;
+
             return (shared[0], shared[1]);
         }
+
+        //public static (int, int) GetSharedEdge(Face a, Face b)
+        //{
+        //    var aVerts = GetVertices(a);
+        //    var bVerts = GetVertices(b);
+
+        //    var shared = aVerts.Intersect(bVerts).ToArray();
+
+        //    return (shared[0], shared[1]);
+        //}
     }
 }

@@ -48,13 +48,20 @@ namespace Maligon.WorkClasses
             return result;
         }
 
+
         private Dictionary<int, int> BuildVertexMap(List<(Face, Face)> pairs)
         {
             var map = new Dictionary<int, int>();
 
             foreach (var (a, b) in pairs)
             {
-                var (v1, v2) = MeshUtils.GetSharedEdge(a, b);
+                var edge = MeshUtils.GetSharedEdge(a, b, _mesh);
+
+                if (edge == null)
+                    throw new Exception($"Invalid pair: faces {a.Id} and {b.Id} do not share an edge");
+                //continue; // 🔴 пропускаем некорректные пары
+
+                var (v1, v2) = edge.Value;
 
                 int newV = CreateMidpoint(v1, v2);
 
