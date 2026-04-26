@@ -105,6 +105,10 @@ namespace Maligon
 
             if (line != null && line.Faces.Count > 1)
             {
+                foreach (Maligon.SubClasses.Face silly in line.Faces)
+                {
+                    Debug.WriteLine(silly.V0 + " " + silly.V1 + " " + silly.V2);
+                }
                 collapser.Collapse(line);
                 MessageBox.Show(line.Faces.Count().ToString());
             }

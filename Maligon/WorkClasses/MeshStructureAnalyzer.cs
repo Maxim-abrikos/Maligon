@@ -68,9 +68,364 @@ namespace Maligon.WorkClasses
 
 
 
+        //Работа с произвольными сетками
+
+        private bool IsVertexUsageValid(OptimizationLine line, Face candidate, bool toHead)
+        {
+            var verts = MeshUtils.GetVertices(candidate);
+
+            // --- базовое ограничение: не более 3 использований ---
+            foreach (var v in verts)
+            {
+                int usage = 0;
+
+                if (line.VertexUsage.TryGetValue(v, out int count))
+                    usage = count;
+
+                if (usage + 1 > 3)
+                    return false;
+            }
+
+            // --- направляющее правило (только после разгона линии) ---
+            if (line.Faces.Count < 4)
+                return true;
+
+            var edgeFace = toHead ? line.Head : line.Tail;
+
+            var prevFace = toHead
+                ? line.Faces.First.Next?.Value
+                : line.Faces.Last.Previous?.Value;
+
+            if (edgeFace == null || prevFace == null)
+                return true;
+
+            int sharedEdge = FindSharedEdgeIndex(edgeFace, prevFace);
+            if (sharedEdge == -1)
+                return true;
+
+            // 🔴 получаем вершины общей грани (edgeFace <-> candidate)
+            int candidateSharedEdge = FindSharedEdgeIndex(edgeFace, candidate);
+            if (candidateSharedEdge == -1)
+                return false;
+
+            var edgeVerts = GetEdgeVertices(edgeFace, candidateSharedEdge);
+
+            // 🔴 получаем направляющую вершину (не входящую в связь с prevFace)
+            var edgeFaceVerts = MeshUtils.GetVertices(edgeFace);
+
+            // вершины грани, по которой edgeFace соединён с prevFace
+            var sharedVerts = GetEdgeVertices(edgeFace, sharedEdge);
+
+            // ищем третью вершину (не входящую в sharedEdge)
+            int guideVertex = -1;
+
+            foreach (var v in edgeFaceVerts)
+            {
+                if (v != sharedVerts.Item1 && v != sharedVerts.Item2)
+                {
+                    guideVertex = v;
+                    break;
+                }
+            }
+
+            // 🔴 ключевая проверка направления
+            if (guideVertex != edgeVerts.Item1 && guideVertex != edgeVerts.Item2)
+                return false;
+
+            return true;
+        }
 
 
+        private void RemoveTail(OptimizationLine line)
+        {
+            var f = line.Faces.Last.Value;
 
+            line.Faces.RemoveLast();
+            line.FaceSet.Remove(f);
+
+            foreach (var v in MeshUtils.GetVertices(f))
+            {
+                if (line.VertexUsage.ContainsKey(v))
+                    line.VertexUsage[v]--;
+            }
+
+            line.RecalculateAreaMean();
+        }
+
+        private void RemoveHead(OptimizationLine line)
+        {
+            var f = line.Faces.First.Value;
+
+            line.Faces.RemoveFirst();
+            line.FaceSet.Remove(f);
+
+            foreach (var v in MeshUtils.GetVertices(f))
+            {
+                if (line.VertexUsage.ContainsKey(v))
+                    line.VertexUsage[v]--;
+            }
+
+            line.RecalculateAreaMean();
+        }
+
+        private OptimizationLine BuildLineFromArbitraryZone(MeshZone zone)
+        {
+            if (zone.Type != ZoneType.Arbitrary)
+                return null;
+
+            var start = FindBestStartFace(zone);
+
+            if (start == null)
+                return null;
+
+            var line = new OptimizationLine();
+            line.AddToTail(start);
+
+            // --- bootstrap: добавляем второго ---
+            Face second = null;
+
+            foreach (var nId in start.Neighbors)
+            {
+                if (nId < 0)
+                    continue;
+
+                var f = mesh.Faces[nId];
+
+                if (!zone.PolygonIds.Contains(f.Id))
+                    continue;
+
+                if (!line.CanUseFaceByTopology(f, toHead: false))
+                    continue;
+
+                second = f;
+                break;
+            }
+
+            if (second == null)
+                return null;
+
+            line.AddToTail(second);
+
+            // --- основной рост ---
+            while (true)
+            {
+                bool grew = false;
+
+                // --- хвост ---
+                var nextTail = FindNextArbitraryFromEnd(line, zone, toHead: false);
+                if (nextTail != null)
+                {
+                    var prev = line.Tail;
+                    var prev2 = line.Faces.Last.Previous?.Value;
+
+                    line.AddToTail(nextTail);
+
+                    if (prev2 != null)
+                    {
+                        var dir1 = GetFaceCenter(prev) - GetFaceCenter(prev2);
+                        var dir2 = GetFaceCenter(nextTail) - GetFaceCenter(prev);
+
+                        float step = dir2.Length();
+
+                        line.UpdateMetrics(dir1, dir2, step, toHead: false);
+                    }
+
+                    grew = true;
+                }
+
+                // --- голова ---
+                var nextHead = FindNextArbitraryFromEnd(line, zone, toHead: true);
+                if (nextHead != null)
+                {
+                    var prev = line.Head;
+                    var prev2 = line.Faces.First.Next?.Value;
+
+                    line.AddToHead(nextHead);
+
+                    if (prev2 != null)
+                    {
+                        var dir1 = GetFaceCenter(prev) - GetFaceCenter(prev2);
+                        var dir2 = GetFaceCenter(nextHead) - GetFaceCenter(prev);
+
+                        float step = dir2.Length();
+
+                        line.UpdateMetrics(dir1, dir2, step, toHead: true);
+                    }
+
+                    grew = true;
+                }
+
+                if (!grew)
+                    break;
+            }
+
+            // --- минимальный размер ---
+            if (line.Faces.Count < 4)
+                return null;
+
+            // --- нормализация ---
+            NormalizeLineForCollapse(line);
+
+            return line;
+        }
+
+        private void NormalizeLineForCollapse(OptimizationLine line)
+        {
+            // --- делаем чётной ---
+            if (line.Faces.Count % 2 != 0)
+            {
+                // удаляем менее "вписанный" край
+                var head = line.Head;
+                var tail = line.Tail;
+
+                float headScore = MathF.Abs(head.Area - line.AreaMean);
+                float tailScore = MathF.Abs(tail.Area - line.AreaMean);
+
+                if (headScore > tailScore)
+                    RemoveHead(line);
+                else
+                    RemoveTail(line);
+            }
+        }
+
+        private bool AreFacesConnected(Face a, Face b)
+        {
+            foreach (var n in a.Neighbors)
+            {
+                if (n == b.Id)
+                    return true;
+            }
+
+            return false;
+        }
+        private Face FindNextArbitraryFromEnd(OptimizationLine line, MeshZone zone, bool toHead)
+        {
+            var edgeFace = toHead ? line.Head : line.Tail;
+
+            if (edgeFace == null)
+                return null;
+
+            var prevFace = toHead
+                ? line.Faces.First.Next?.Value
+                : line.Faces.Last.Previous?.Value;
+
+            var candidates = new List<Face>();
+
+            // --- собираем кандидатов ---
+            for (int i = 0; i < 3; i++)
+            {
+                int nId = edgeFace.Neighbors[i];
+                if (nId < 0)
+                    continue;
+
+                var f = mesh.Faces[nId];
+
+                if (!zone.PolygonIds.Contains(f.Id))
+                    continue;
+
+                if (line.Contains(f))
+                    continue;
+
+                if (!line.CanUseFaceByTopology(f, toHead))
+                    continue;
+
+                if (!IsVertexUsageValid(line, f, toHead))
+                    continue;
+                if (!PassesThirdFromEndRule(line, f, toHead))
+                    continue;
+
+                candidates.Add(f);
+            }
+
+            if (candidates.Count == 0)
+                return null;
+
+            // --- если нет prevFace — берём любой допустимый ---
+            if (prevFace == null)
+                return candidates[0];
+
+            // --- определяем фазу ---
+            bool isClosingPhase = (line.Faces.Count % 2 == 1);
+
+            Face best = null;
+
+            foreach (var f in candidates)
+            {
+                if (isClosingPhase)
+                {
+                    // 🔴 ФАЗА ЗАКРЫТИЯ КВАДА
+
+                    // кандидат должен быть связан и с edgeFace, и с prevFace
+                    if (!AreFacesConnected(f, prevFace))
+                        continue;
+
+                    return f; // сразу берём — это приоритет
+                }
+                else
+                {
+                    // 🔵 ФАЗА ОТКРЫТИЯ
+
+                    // кандидат НЕ должен быть связан с prevFace
+                    if (AreFacesConnected(f, prevFace))
+                        continue;
+
+                    // можно дополнительно оставить только ближайшего по площади
+                    if (best == null)
+                        best = f;
+                    else
+                    {
+                        float d1 = MathF.Abs(f.Area - edgeFace.Area);
+                        float d2 = MathF.Abs(best.Area - edgeFace.Area);
+
+                        if (d1 < d2)
+                            best = f;
+                    }
+                }
+            }
+
+            return best;
+        }
+
+        // Проверка: кандидат не должен "цепляться" за старую часть линии
+        // Разрешены связи только с 1–2 крайними полигонами
+        private bool PassesThirdFromEndRule(OptimizationLine line, Face candidate, bool toHead)
+        {
+            if (line == null || candidate == null)
+                return false;
+
+            // короткая линия — не ограничиваем
+            if (line.Faces.Count < 3)
+                return true;
+
+            int connections = 0;
+
+            foreach (var f in line.Faces)
+            {
+                if (ShareAnyVertex(candidate, f))
+                {
+                    connections++;
+
+                    // 🔴 ключ: если больше 2 — это уже "заворот"
+                    if (connections > 2)
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        private bool ShareAnyVertex(Face a, Face b)
+        {
+            if (a == null || b == null)
+                return false;
+
+            // Проверяем все 3x3 комбинации
+            if (a.V0 == b.V0 || a.V0 == b.V1 || a.V0 == b.V2) return true;
+            if (a.V1 == b.V0 || a.V1 == b.V1 || a.V1 == b.V2) return true;
+            if (a.V2 == b.V0 || a.V2 == b.V1 || a.V2 == b.V2) return true;
+
+            return false;
+        }
 
 
         //Проверка чётности линии в конце
@@ -115,26 +470,6 @@ namespace Maligon.WorkClasses
 
             line.RecalculateAreaMean();
         }
-        private void RemoveTail(OptimizationLine line)
-        {
-            var f = line.Tail;
-
-            line.Faces.RemoveLast();
-            line.FaceSet.Remove(f);
-
-            // ⚠️ упрощённо: пересчитать всё
-            RebuildVertexData(line);
-        }
-
-        private void RemoveHead(OptimizationLine line)
-        {
-            var f = line.Head;
-
-            line.Faces.RemoveFirst();
-            line.FaceSet.Remove(f);
-
-            RebuildVertexData(line);
-        }
 
         private float EvaluateEnd(Face prev, Face end)
         {
@@ -166,8 +501,6 @@ namespace Maligon.WorkClasses
 
             if (!BuildInitialQuad(line, zone, out _))
                 return null;
-
-            //UpdateZoneDirection(zone, line); // Вот тут хлам
 
             GrowLine(line, zone);
 
@@ -281,9 +614,13 @@ namespace Maligon.WorkClasses
                 if (!line.CanUseFaceByTopology(f, toHead))
                     continue;
                 //if (!IsStrictStripContinuation(edgeFace, prevFace, f, line))
-                //    continue;
+                //    continue; ВОТ ТУТ ГОВНО
                 if (!IsEdgeBasedContinuation(edgeFace, f, line))
                     continue;
+                if (!IsVertexUsageValid(line, f, toHead))
+                    continue;
+                //if (PassesThirdFromEndRule(line, f, toHead))
+                //    continue;
 
                 bool isDiagonal = IsEdgeDiagonal(edgeFace, i);
 
@@ -344,30 +681,6 @@ namespace Maligon.WorkClasses
 
 
 
-        private bool CheckVertex(int v, Face edgeFace, Face prevFace, OptimizationLine line)
-        {
-            if (!line.VertexFaces.TryGetValue(v, out var faces))
-                return false;
-
-            int count = faces.Count;
-
-            int edgeCount = faces.Count(f => f.Id == edgeFace.Id);
-            int prevCount = faces.Count(f => f.Id == prevFace.Id);
-
-            // --- вариант 1: (2) от edgeFace
-            if (count == 2 && edgeCount == 2)
-                return true;
-
-            // --- вариант 2: (3) = 2 от edgeFace + 1 от prev
-            if (count == 3 && edgeCount == 2 && prevCount == 1)
-                return true;
-
-            return false;
-        }
-
-
-
-
         private (int, int) GetEdgeVertices(Face f, int edgeIndex)
         {
             return edgeIndex switch
@@ -378,27 +691,6 @@ namespace Maligon.WorkClasses
                 _ => throw new ArgumentOutOfRangeException(nameof(edgeIndex))
             };
         }
-
-        //private bool IsValidStripContinuation(Face edgeFace, Face candidate, OptimizationLine line)
-        //{
-        //    int sharedEdge = FindSharedEdgeIndex(edgeFace, candidate);
-
-        //    if (sharedEdge == -1)
-        //        return false;
-
-        //    var edgeVerts = GetEdgeVertices(edgeFace, sharedEdge);
-
-        //    int v0 = edgeVerts.Item1;
-        //    int v1 = edgeVerts.Item2;
-
-        //    int count0 = line.VertexUsage.TryGetValue(v0, out var c0) ? c0 : 0;
-        //    int count1 = line.VertexUsage.TryGetValue(v1, out var c1) ? c1 : 0;
-
-        //    // 🔴 ключевое правило: (2 + 3)
-        //    return (count0 == 2 && count1 == 3) ||
-        //           (count0 == 3 && count1 == 2);
-        //}
-
 
         private Face FindFourthFromStrip(Face second, Face third, OptimizationLine line, MeshZone zone)
         {
@@ -469,30 +761,57 @@ namespace Maligon.WorkClasses
             return best;
         }
 
+
         public OptimizationLine BuildLine()
         {
             if (zones == null || zones.Count == 0)
                 return null;
 
-            // фильтруем зоны
-            var candidates = zones
+            // =====================================================
+            // 1. ПРОБУЕМ РЕГУЛЯРНЫЕ ЗОНЫ
+            // =====================================================
+
+            var regularZones = zones
                 .Where(z => z.Type == ZoneType.RegularConstant && z.Polygons.Count >= 4)
+                .OrderByDescending(z => z.Polygons.Count)
                 .ToList();
 
-            if (candidates.Count == 0)
-                return null;
+            foreach (var zone in regularZones)
+            {
+                var line = BuildLineFromZone(zone);
 
-            // пока выбираем самую большую
-            var bestZone = candidates
+                if (line != null && line.Faces.Count >= 4)
+                {
+                    EnsureEvenLine(line);
+                    return line;
+                }
+            }
+
+            // =====================================================
+            // 2. FALLBACK: ПРОИЗВОЛЬНЫЕ ЗОНЫ
+            // =====================================================
+
+            var arbitraryZones = zones
+                .Where(z => z.Type == ZoneType.Arbitrary && z.Polygons.Count >= 4)
                 .OrderByDescending(z => z.Polygons.Count)
-                .First();
+                .ToList();
 
-            var line = BuildLineFromZone(bestZone);
+            foreach (var zone in arbitraryZones)
+            {
+                var line = BuildLineFromArbitraryZone(zone);
 
-            EnsureEvenLine(line);
+                if (line != null && line.Faces.Count >= 4)
+                {
+                    EnsureEvenLine(line);
+                    return line;
+                }
+            }
 
-            return line;
-            //return BuildLineFromZone(bestZone);
+            // =====================================================
+            // 3. НИЧЕГО НЕ НАШЛИ
+            // =====================================================
+
+            return null;
         }
 
         private bool IsEdgeDiagonal(Face face, int edgeIndex)
@@ -601,11 +920,6 @@ namespace Maligon.WorkClasses
         {
             return zone.PolygonIds.Contains(faceId);
         }
-
-        // Формирует одну зону через flood fill:
-        // - сначала сравнение с стартовым полигоном
-        // - затем со средним по зоне
-        // - учитывает допуск по площади
 
         private void FloodFillZone(Face startFace, MeshZone zone, bool[] visited)
         {

@@ -23,7 +23,7 @@ namespace Maligon.WorkClasses
             var vertexMap = BuildVertexMap(pairs);
 
             // 3. Применяем remap ко всему мешу
-            RemapVertices(vertexMap);
+            //RemapVertices(vertexMap);
 
             // 4. Удаляем полигоны линии
             RemoveLineFaces(line);
